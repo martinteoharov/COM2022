@@ -68,6 +68,9 @@ class Server:
 
                 self.__sendto(response_payload, address, size = size)
 
+            if payload_dict["ack"] == 1:
+                self.__add_target(address)
+
 
     # This function initiates a TCP-like two-way handshake with the target. (https://www.vskills.in/certification/tutorial/tcp-connection-establish-and-terminate/)
     #
