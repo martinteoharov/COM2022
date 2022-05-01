@@ -1,7 +1,7 @@
 transport = "UDP"
 
 # maxQueueSize = 1000
-bufferSize = 1024
+buffer_size = 1024
 
 waiter = ("127.0.0.1", 3000)
 

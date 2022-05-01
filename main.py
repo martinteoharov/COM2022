@@ -7,7 +7,7 @@ waiter = Server(
         ip = config.waiter[0], 
         port = config.waiter[1], 
         transport = config.transport, 
-        bufferSize = config.bufferSize, 
+        buffer_size = config.buffer_size, 
     )
 
 kitchen = Server(
@@ -16,7 +16,7 @@ kitchen = Server(
         ip = config.kitchen[0], 
         port = config.kitchen[1], 
         transport = config.transport, 
-        bufferSize = config.bufferSize, 
+        buffer_size = config.buffer_size, 
     )
 
 
