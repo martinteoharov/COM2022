@@ -19,6 +19,8 @@ kitchen = Server(
         buffer_size = config.buffer_size, 
     )
 
+print("")
+
 
 target = config.kitchen
 waiter.conn(target)

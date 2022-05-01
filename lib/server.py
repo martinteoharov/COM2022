@@ -2,7 +2,6 @@ import socket
 import threading
 import json
 
-import bitarray
 from bitstring import BitArray
 import binascii
 
@@ -44,27 +43,37 @@ class Server:
         while True:
             # bytes contains the request, address contains the requesting person's address
             payload, address = self.UDPServerSocket.recvfrom(self.buffer_size)
+            print("")
 
-            self.__log(
-                f"recieved payload: {payload} from: {address[0]}:{address[1]}")
+            self.__log(f"recieved payload: {payload} from: {address[0]}:{address[1]}")
 
             payload_dict = self.__map_payload_to_dict(payload)
-            self.__log(f"decoded payload to dict: {payload_dict}")
 
-            if bytes == "SYN":
-                pass
+            self.__log(f"decoded dict from payload: {payload_dict}")
 
-            # self.__add_target(target)
+            if payload_dict["syn"] == 1:
+                diffie_hellman = {"kur": "kapan"}
+                response_dict = {
+                    "syn": 0,
+                    "ack": 1,
+                    "fin": 0,
+                    "cor": 0,
+                    "sequence_number": payload_dict.get("sequence_number") or 0,
+                    "body": diffie_hellman
+                }
 
+                response_payload, size = self.__map_dict_to_payload(response_dict)
+
+                self.__add_target(address)
+
+                self.__sendto(response_payload, address, size = size)
+
+
+    # This function initiates a TCP-like two-way handshake with the target. (https://www.vskills.in/certification/tutorial/tcp-connection-establish-and-terminate/)
     #
-    # Establish a connection with your specified target.
-    #
-    # This function performs a TCP-like three-way handshake with the target. (https://www.vskills.in/certification/tutorial/tcp-connection-establish-and-terminate/)
     # args: target
-    # returns: targets list
-    #
-
-    def conn(self, target):
+    # returns: void
+    def conn(self, target: tuple) -> None:
         diffie_hellman = {"kur": "kapan"}
 
         payload_dict = {
@@ -75,11 +84,9 @@ class Server:
             "body": diffie_hellman
         }
 
-        payload = self.__map_dict_to_payload(payload_dict)
+        payload, size = self.__map_dict_to_payload(payload_dict)
 
-        self.__log(f"payload: {payload}")
-
-        self.__sendto(payload, target)
+        self.__sendto(payload, target, size = size)
 
     # Builds and sends a packet
     def send(self, message):
@@ -92,7 +99,6 @@ class Server:
             self.__sendto(self.__encode(message), target)
 
     # adds target to the list of targets if it is not there already
-
     def __add_target(self, target):
         if target not in self.targets:
             self.targets.append(target)
@@ -107,15 +113,15 @@ class Server:
         print(f"[{self.name.upper()}]{space} {message}")
 
     # raw __sendto wrapper
-    def __sendto(self, *args):
+    def __sendto(self, *args, **kwargs):
+        if kwargs.get("size"):
+            self.__log(f"sending {kwargs.get('size')} bits, payload: {args[0]}")
+
         self.UDPServerSocket.sendto(*args)
 
     # encodes message in utf 8
     def __encode(self, message: str):
         return str.encode(message)
-
-    def __calculate_checksum(self, payload: bytes):
-        pass
 
     # Example dict format argument:
     #
@@ -127,8 +133,6 @@ class Server:
     # }
     #
     # checksum & sequence number are being calculated here
-    #
-
     def __map_dict_to_payload(self, data: dict):
         self.__log(f"mapping dict: {data} to payload")
 
@@ -136,14 +140,21 @@ class Server:
         body_json_stringified = json.dumps(data.get("body") or {})
         body_json_stringified_bitstring = self.__string_to_bitstring(body_json_stringified)
 
-        # calculate new sequnce_number
-        self.sequence_number = self.sequence_number + 48 + (len(body_json_stringified_bitstring) // 8)
+        sequence_number = 0
+        if self.type == "kitchen":
+            sequence_number = data.get("sequence_number") + 48 + (len(body_json_stringified_bitstring) // 8)
 
-        if self.sequence_number > 4096:
-            self.__log("SEQUENCE NUMBER TOO HIGH BLYAT")
+        elif self.type == "waiter":
+            # calculate new sequnce_number
+            sequence_number = self.sequence_number + 48 + (len(body_json_stringified_bitstring) // 8)
 
+            if sequence_number > 4096:
+                self.__log("SEQUENCE NUMBER TOO HIGH BLYAT")
+            else:
+                self.sequence_number = sequence_number
+            
         # use 12 bits to encode sequence_number
-        sequence_number_bitstring = "{0:012b}".format(self.sequence_number)
+        sequence_number_bitstring = "{0:012b}".format(sequence_number)
 
         # pack bits
         bitstring = ""
@@ -157,13 +168,27 @@ class Server:
         # calculate checksum bitstring based on accumulated bitstring so far 
         checksum_bitstring = "{:0b}".format(binascii.crc_hqx(self.__bitstring_to_bytes(bitstring), 0))
 
+        if len(checksum_bitstring) < 16:
+            print("Checksum is shorter than 16 hmmm")
+            checksum_bitstring = 16 * "0"
+
         # define 0b in the end so we dont need to take into account the first 2 indexes when manipulating the data
         bitstring = "0b" + checksum_bitstring + bitstring
 
-        print(bitstring)
+        return self.__bitstring_to_bytes(bitstring), len(bitstring) - 2
 
-        return self.__bitstring_to_bytes(bitstring)
-
+    # 
+    # Returns
+    # {
+    #   syn: int,
+    #   ack: int,
+    #   fin: int,
+    #   body: dict,
+    #   sequence_number: int,
+    #   checksum: bitstring,
+    # }
+    #
+    #
     def __map_payload_to_dict(self, payload: bytes):
         # convert bytes to bitarray and remove first 8 bits (TODO: investigate why the function returns 1 zero-ed byte in front)
         bitstring = BitArray(bytes=payload).bin[8:]
@@ -181,14 +206,13 @@ class Server:
         body_bytes = self.__bitstring_to_bytes(body)
 
         sequence_number_int = 69
-        
 
         payload_dict = {
             "syn": int(syn), 
             "ack": int(ack), 
             "fin": int(fin), 
             "cor": int(cor), 
-            "sequence_number": sequence_number, 
+            "sequence_number": sequence_number_int, 
             "checksum": checksum, 
             "body": json.loads(body_bytes)
         }
@@ -204,23 +228,3 @@ class Server:
 
     def __bitstring_to_bytes(self, s: str):
         return int(s, 2).to_bytes((len(s) + 7) // 8, byteorder='big')
-
-
-
-
-# def create(*, ip: str, port: int, transport: str, bufferSize: int, name: str):
-#     socket_type = socket.SOCK_DGRAM if transport == "UDP" else socket.SOCK_STREAM
-#     UDPServerSocket = socket.socket(family=socket.AF_INET, type=socket_type)
-
-#     # Bind to address and ip
-#     # 127.0.0.1
-#     UDPServerSocket.bind((ip, port))
-
-#     # Log startup
-#     print(f"Server '{name}' up and listening on {ip}:{port} ({transport})")
-
-#     # Start listening thread
-#     t = threading.Thread(target=listen, args=(bufferSize, UDPServerSocket, name))
-#     t.start()
-
-#     return UDPServerSocket
