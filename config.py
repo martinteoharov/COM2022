@@ -1,5 +1,7 @@
 transport = "UDP"
 
+timeout_ms = 1000
+
 # maxQueueSize = 1000
 buffer_size = 1024
 

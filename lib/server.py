@@ -5,6 +5,9 @@ import json
 from bitstring import BitArray
 import binascii
 
+import pyDH
+
+
 class Server:
     def __init__(self, *, name: str, type: str, ip: str, port: int, transport: str, buffer_size: int):
         # set values
@@ -15,6 +18,10 @@ class Server:
         self.buffer_size = buffer_size
         self.transport = transport
         self.targets = []
+
+        # define diffie hellman stuff
+        self.dh = pyDH.DiffieHellman()
+        self.pub_key = str(self.dh.gen_public_key())
 
         # define a sequence number
         if type == "waiter":
@@ -34,25 +41,35 @@ class Server:
         self.thread = threading.Thread(target=self.listen)
         self.thread.start()
 
-    # This function boots up a thread that listens for incoming messages on the defined UDP socket
-
+    # this function boots up a thread that listens for incoming messages on the defined UDP socket
     def listen(self):
         # Log startup
         self.__log(f"PASSIVE OPEN {self.ip}:{self.port} ({self.transport})")
 
         while True:
-            # bytes contains the request, address contains the requesting person's address
+            # payload contains the request in bytes, address contains the requesting person's address
             payload, address = self.UDPServerSocket.recvfrom(self.buffer_size)
             print("")
 
+            # log & map payload
             self.__log(f"recieved payload: {payload} from: {address[0]}:{address[1]}")
-
-            payload_dict = self.__map_payload_to_dict(payload)
-
+            payload_dict, payload_is_corrupted = self.__map_payload_to_dict(payload)
             self.__log(f"decoded dict from payload: {payload_dict}")
 
+            # check for corruption
+            if payload_is_corrupted == True:
+                self.__log("detected a corrupted package...")
+            
+            # check if first stage of handshake
             if payload_dict["syn"] == 1:
-                diffie_hellman = {"kur": "kapan"}
+
+                # create shared key
+                body = payload_dict.get("body")
+                pub_key = body.get("pub_key")
+                shared_key = self.dh.gen_shared_key(pub_key)
+
+                diffie_hellman = {"pub_key": self.pub_key}
+                
                 response_dict = {
                     "syn": 0,
                     "ack": 1,
@@ -64,12 +81,21 @@ class Server:
 
                 response_payload, size = self.__map_dict_to_payload(response_dict)
 
-                self.__add_target(address)
+                self.__add_target(address, shared_key)
 
                 self.__sendto(response_payload, address, size = size)
 
+            # check if second stage of handshake
             if payload_dict["ack"] == 1:
+                self.dh = pyDH.DiffieHellman()
+
+                self.pub_key = self.dh.get_public_key()
+
+
+
                 self.__add_target(address)
+
+
 
 
     # This function initiates a TCP-like two-way handshake with the target. (https://www.vskills.in/certification/tutorial/tcp-connection-establish-and-terminate/)
@@ -77,7 +103,8 @@ class Server:
     # args: target
     # returns: void
     def conn(self, target: tuple) -> None:
-        diffie_hellman = {"kur": "kapan"}
+        # define diffie_hellman stuff
+        diffie_hellman = {"pub_key": self.pub_key}
 
         payload_dict = {
             "syn": 1,
@@ -101,12 +128,146 @@ class Server:
             self.__log(f"sending \"{message}\" to {target[0]}:{target[1]}")
             self.__sendto(self.__encode(message), target)
 
+    # Example dict format argument:
+    #
+    # {
+    #   syn: int (0 or 1),
+    #   ack: int (0 or 1),
+    #   fin: int (0 or 1),
+    #   body: string (json dumps),
+    # }
+    #
+    # checksum & sequence number are being calculated here
+    def __map_dict_to_payload(self, data: dict):
+        # process body
+        body_json_stringified = json.dumps(data.get("body") or {})
+        body_json_stringified_bitstring = self.__string_to_bitstring(body_json_stringified)
+
+        # calculate sequence number
+        sequence_number = 0
+        if self.type == "kitchen":
+            sequence_number = data.get("sequence_number") + 32 + (len(body_json_stringified_bitstring))
+
+        elif self.type == "waiter":
+            # calculate new sequnce_number
+            sequence_number = self.sequence_number + 32 + (len(body_json_stringified_bitstring))
+
+            self.sequence_number = sequence_number
+        
+
+        if sequence_number > 10000:
+            self.__log("SEQUENCE NUMBER TOO HIGH BLYAT")
+            
+            
+        # use 12 bits to encode sequence_number
+        sequence_number_bitstring = "{0:012b}".format(sequence_number)
+
+        # pack bits
+        bitstring = ""
+        bitstring += str(data.get("syn")) or str(0)
+        bitstring += str(data.get("ack")) or str(0)
+        bitstring += str(data.get("fin")) or str(0)
+        bitstring += str(data.get("cor")) or str(0)
+        bitstring += sequence_number_bitstring
+        bitstring += body_json_stringified_bitstring
+
+        f = open("original", "w")
+        f.write(bitstring)
+        f.close()
+        
+        # calculate checksum bitstring based on accumulated bitstring so far 
+        checksum_bitstring = self.__calculate_checksum(bitstring)
+
+        print(checksum_bitstring)
+
+        if(len(checksum_bitstring) < 16):
+            print("checksum length is short wtf")
+
+
+        # define 0b in the end so we dont need to take into account the first 2 indexes when manipulating the data
+        bitstring = "0b" + checksum_bitstring + bitstring
+
+        return self.__bitstring_to_bytes(bitstring), len(bitstring) - 2
+
+    # 
+    # Returns
+    # {
+    #   syn: int,
+    #   ack: int,
+    #   fin: int,
+    #   cor: int,
+    #   body: dict,
+    #   sequence_number: int,
+    #   checksum: bitstring,
+    #   corruputed: boolean
+    # }
+    #
+    #
+    def __map_payload_to_dict(self, payload: bytes):
+        # convert bytes to bitarray and remove first 8 bits (TODO: investigate why the function returns 1 zero-ed byte in front)
+        bitstring = BitArray(bytes=payload).bin[8:]
+        
+        checksum = bitstring[0:16]
+        syn = bitstring[16]
+        ack = bitstring[17]
+        fin = bitstring[18]
+        cor = bitstring[19]
+        sequence_number = bitstring[20:32]
+        body = bitstring[32:]
+
+        # validate checksum
+        f = open("kur", "w")
+        f.write(bitstring[15:])
+        f.close()
+
+        expected_checksum = self.__calculate_checksum(bitstring[15:])
+
+        print(expected_checksum)
+        print(checksum)
+
+        corrupted = False
+        if checksum == expected_checksum:
+            self.__log("checksum matches...")
+        else:
+            self.__log("[!] CHECKSUM MISSMATCH")
+            corrupted = True
+
+        # convert body bitstring to bytes obj
+        body_bytes = self.__bitstring_to_bytes(body)
+
+        # decode decimal int from bits
+        sequence_number_int = int(sequence_number, 2)
+
+        payload_dict = {
+            "syn": int(syn), 
+            "ack": int(ack), 
+            "fin": int(fin), 
+            "cor": int(cor), 
+            "sequence_number": sequence_number_int, 
+            "checksum": checksum, 
+            "body": json.loads(body_bytes),
+        }
+
+        return payload_dict, corrupted
+
+    def __calculate_checksum(self, bitstring: str) -> str:
+        return "{0:016b}".format(binascii.crc_hqx(self.__bitstring_to_bytes(bitstring), 0))
+
+    def __string_to_bitstring(self, s: str):
+        ords = (ord(c) for c in s)
+        shifts = (7, 6, 5, 4, 3, 2, 1, 0)
+        bitlist = [str((o >> shift) & 1) for o in ords for shift in shifts]
+        bitstring = ''.join(bitlist)
+        return bitstring
+
+    def __bitstring_to_bytes(self, s: str):
+        return int(s, 2).to_bytes((len(s) + 7) // 8, byteorder='big')
+
     # adds target to the list of targets if it is not there already
-    def __add_target(self, target):
+    def __add_target(self, target, shared_key):
         if target not in self.targets:
-            self.targets.append(target)
-            self.__log(
-                f"connection added to targets. Targets list: {self.targets}")
+            self.targets.append((target[0], target[1], shared_key))
+            self.__log(f"connection added to targets. Targets list: {self.targets}")
 
     # logs a message to the console using self values as identifiers
     def __log(self, message):
@@ -125,109 +286,3 @@ class Server:
     # encodes message in utf 8
     def __encode(self, message: str):
         return str.encode(message)
-
-    # Example dict format argument:
-    #
-    # {
-    #   syn: int (0 or 1),
-    #   ack: int (0 or 1),
-    #   fin: int (0 or 1),
-    #   body: string (json dumps),
-    # }
-    #
-    # checksum & sequence number are being calculated here
-    def __map_dict_to_payload(self, data: dict):
-        self.__log(f"mapping dict: {data} to payload")
-
-        # process body
-        body_json_stringified = json.dumps(data.get("body") or {})
-        body_json_stringified_bitstring = self.__string_to_bitstring(body_json_stringified)
-
-        sequence_number = 0
-        if self.type == "kitchen":
-            sequence_number = data.get("sequence_number") + 48 + (len(body_json_stringified_bitstring) // 8)
-
-        elif self.type == "waiter":
-            # calculate new sequnce_number
-            sequence_number = self.sequence_number + 48 + (len(body_json_stringified_bitstring) // 8)
-
-            if sequence_number > 4096:
-                self.__log("SEQUENCE NUMBER TOO HIGH BLYAT")
-            else:
-                self.sequence_number = sequence_number
-            
-        # use 12 bits to encode sequence_number
-        sequence_number_bitstring = "{0:012b}".format(sequence_number)
-
-        # pack bits
-        bitstring = ""
-        bitstring += str(data.get("syn")) or str(0)
-        bitstring += str(data.get("ack")) or str(0)
-        bitstring += str(data.get("fin")) or str(0)
-        bitstring += str(data.get("cor")) or str(0)
-        bitstring += sequence_number_bitstring
-        bitstring += body_json_stringified_bitstring
-
-        # calculate checksum bitstring based on accumulated bitstring so far 
-        checksum_bitstring = "{:0b}".format(binascii.crc_hqx(self.__bitstring_to_bytes(bitstring), 0))
-
-        if len(checksum_bitstring) < 16:
-            print("Checksum is shorter than 16 hmmm")
-            checksum_bitstring = 16 * "0"
-
-        # define 0b in the end so we dont need to take into account the first 2 indexes when manipulating the data
-        bitstring = "0b" + checksum_bitstring + bitstring
-
-        return self.__bitstring_to_bytes(bitstring), len(bitstring) - 2
-
-    # 
-    # Returns
-    # {
-    #   syn: int,
-    #   ack: int,
-    #   fin: int,
-    #   body: dict,
-    #   sequence_number: int,
-    #   checksum: bitstring,
-    # }
-    #
-    #
-    def __map_payload_to_dict(self, payload: bytes):
-        # convert bytes to bitarray and remove first 8 bits (TODO: investigate why the function returns 1 zero-ed byte in front)
-        bitstring = BitArray(bytes=payload).bin[8:]
-        
-        checksum = bitstring[0:16]
-        syn = bitstring[16]
-        ack = bitstring[17]
-        fin = bitstring[18]
-        cor = bitstring[19]
-        sequence_number = bitstring[20:31]
-        body = bitstring[32:]
-
-        checksum_bytes = self.__bitstring_to_bytes(checksum)
-        sequence_number_bytes = self.__bitstring_to_bytes(sequence_number)
-        body_bytes = self.__bitstring_to_bytes(body)
-
-        sequence_number_int = 69
-
-        payload_dict = {
-            "syn": int(syn), 
-            "ack": int(ack), 
-            "fin": int(fin), 
-            "cor": int(cor), 
-            "sequence_number": sequence_number_int, 
-            "checksum": checksum, 
-            "body": json.loads(body_bytes)
-        }
-
-        return payload_dict
-
-    def __string_to_bitstring(self, s: str):
-        ords = (ord(c) for c in s)
-        shifts = (7, 6, 5, 4, 3, 2, 1, 0)
-        bitlist = [str((o >> shift) & 1) for o in ords for shift in shifts]
-        bitstring = ''.join(bitlist)
-        return bitstring
-
-    def __bitstring_to_bytes(self, s: str):
-        return int(s, 2).to_bytes((len(s) + 7) // 8, byteorder='big')
