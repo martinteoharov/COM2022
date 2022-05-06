@@ -2,11 +2,15 @@ import socket
 import threading
 import json
 
+import os
+
 from bitstring import BitArray
 import binascii
 
 import pyDH
 
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
 
 class Server:
     def __init__(self, *, name: str, type: str, ip: str, port: int, transport: str, buffer_size: int):
@@ -51,10 +55,14 @@ class Server:
             payload, address = self.UDPServerSocket.recvfrom(self.buffer_size)
             print("")
 
+            target = self.__find_target(address)
+            key = None
+            if len(target) == 3:
+                key = target[2]
+
             # log & map payload
-            #self.__log(f"recieved payload: {payload} from: {address[0]}:{address[1]}")
-            payload_dict, payload_is_corrupted = self.__map_payload_to_dict(
-                payload)
+            self.__log(f"recieved payload: {payload} from: {address[0]}:{address[1]}")
+            payload_dict, payload_is_corrupted = self.__map_payload_to_dict(payload, key=key)
             self.__log(f"decoded dict from payload: {payload_dict}")
 
             # check for corruption
@@ -65,8 +73,8 @@ class Server:
             if payload_dict["syn"] == 1:
 
                 # create shared key
-                body = payload_dict.get("body")
-                pub_key = body.get("pub_key")
+                body = payload_dict["body"]
+                pub_key = body["pub_key"]
                 shared_key = self.dh.gen_shared_key(pub_key)
 
                 diffie_hellman = {"pub_key": self.pub_key}
@@ -80,11 +88,11 @@ class Server:
                     "body": diffie_hellman
                 }
 
-                response_payload, size = self.__map_dict_to_payload(
-                    response_dict)
+                response_payload, size = self.__map_dict_to_payload(response_dict)
 
                 # add target
                 self.__add_target(address, shared_key)
+
 
                 # send diffie hellman data
                 self.__sendto(payload=response_payload, target=address, size=size)
@@ -92,8 +100,8 @@ class Server:
             if payload_dict["ack"] == 1:
 
                 # create shared key
-                body = payload_dict.get("body")
-                pub_key = body.get("pub_key")
+                body = payload_dict["body"]
+                pub_key = body["pub_key"]
                 shared_key = self.dh.gen_shared_key(pub_key)
 
                 # add target
@@ -123,24 +131,29 @@ class Server:
     # Builds and sends a packet
     def send(self, *, message):
         if not self.targets:
-            self.__log(
-                "SEND(); error: target list looks empty, did you establish a connection?")
+            self.__log("SEND(); error: target list looks empty, did you establish a connection?")
 
         target = None
         if self.type == "waiter":
             target = self.targets[0]
+
+        body = { "message": message }
 
         request_dict = {
             "syn": 0,
             "ack": 0,
             "fin": 0,
             "cor": 0,
-            "body": {message: message}
+            "body": body
         }
 
-        request_payload, = self.__map_dict_to_payload(request_dict)
+        key = None
+        if target and len(target) > 2:
+            key = target[2]
 
-        print(target)
+        request_payload, size = self.__map_dict_to_payload(request_dict, key=key)
+
+        self.__log(f"sending {size} bits, payload: {request_payload}")
 
         self.__sendto(payload=request_payload, target=target)
 
@@ -155,30 +168,31 @@ class Server:
     #
     # checksum & sequence number are being calculated here
 
-    def __map_dict_to_payload(self, data: dict):
+    def __map_dict_to_payload(self, data: dict, **kwargs):
+        key = kwargs.get("key")
+
         # process body
-        body_json_stringified = json.dumps(data.get("body") or {})
-        body_json_stringified_bitstring = self.__string_to_bitstring(
-            body_json_stringified)
+        body_stringified = json.dumps(data.get("body") or {})
+
+        if key is not None:
+            self.__log(f"Key Detected: {key}. Encrypting body...")
+            self.__log(f"Body before: {body_stringified} ")
+            body_stringified = self.__encrypt_diffie_hellman(body_stringified, key)
+            self.__log(f"Body after: {body_stringified} ")
+
+        body_bitstring = self.__string_to_bitstring(body_stringified)
+
 
         # calculate sequence number
         sequence_number = 0
-        if self.type == "kitchen":
-            sequence_number = data.get(
-                "sequence_number") + (32 + (len(body_json_stringified_bitstring))) // 8
-
+        if self.type == "kitchen": 
+            sequence_number = data.get("sequence_number") or 0
+            sequence_number = sequence_number + (32 + (len(body_bitstring))) // 8
         elif self.type == "waiter":
-            # calculate new sequnce_number
-            sequence_number = (self.sequence_number + 32 +
-                               (len(body_json_stringified_bitstring))) // 8
-
+            sequence_number = (self.sequence_number + 32 + (len(body_bitstring))) // 8
             self.sequence_number = sequence_number
 
-        if sequence_number > 10000:
-            self.__log("SEQUENCE NUMBER TOO HIGH BLYAT")
-
-        # use 12 bits to encode sequence_number
-        sequence_number_bitstring = "{0:012b}".format(sequence_number)
+        sequence_number_bitstring = "{0:012b}".format(sequence_number) # use 12 bits to encode sequence_number
 
         # pack bits
         bitstring = ""
@@ -187,16 +201,15 @@ class Server:
         bitstring += str(data.get("fin")) or str(0)
         bitstring += str(data.get("cor")) or str(0)
         bitstring += sequence_number_bitstring
-        bitstring += body_json_stringified_bitstring
-
-        # calculate checksum bitstring based on accumulated bitstring so far
-        checksum_bitstring = self.__calculate_checksum(bitstring)
+        bitstring += body_bitstring
+        checksum_bitstring = self.__calculate_checksum(bitstring) # calculate checksum bitstring based on accumulated bitstring so far
 
         if(len(checksum_bitstring) < 16):
             print("checksum length is short wtf")
 
         bitstring = checksum_bitstring + bitstring
 
+        # return bytes and size of bitstring
         return self.__bitstring_to_bytes(bitstring), len(bitstring)
 
     #
@@ -213,9 +226,11 @@ class Server:
     # }
     #
     #
-    def __map_payload_to_dict(self, payload: bytes):
-        # convert bytes to bitarray
-        bitstring = BitArray(bytes=payload).bin
+    def __map_payload_to_dict(self, payload: bytes, **kwargs):
+        key = kwargs.get("key")
+
+        # convert bytes to bitstring
+        bitstring = self.__bytes_to_bitstring(payload)
 
         self.__log(f"recieved {len(bitstring)} bits")
 
@@ -237,7 +252,11 @@ class Server:
             corrupted = True
 
         # convert body bitstring to bytes obj
-        body_bytes = self.__bitstring_to_bytes(body)
+        body_string = self.__bitstring_to_bytes(body).decode("utf-8")
+
+        if key is not None:
+            self.__log(f"Found key: {key}")
+            body_string = self.__decrypt_diffie_hellman(body_string, key)
 
         # decode decimal int from bits
         sequence_number_int = int(sequence_number, 2)
@@ -249,7 +268,7 @@ class Server:
             "cor": int(cor),
             "sequence_number": sequence_number_int,
             "checksum": checksum,
-            "body": json.loads(body_bytes),
+            "body": json.loads(body_string),
         }
 
         return payload_dict, corrupted
@@ -257,11 +276,26 @@ class Server:
     def __calculate_checksum(self, bitstring: str) -> str:
         return "{0:016b}".format(binascii.crc_hqx(self.__bitstring_to_bytes(bitstring), 0))
 
-    def __decrypt_diffie_hellman(self, bytes, target):
-        pass
+    def __encrypt_diffie_hellman(self, body: str, key: str):
+        iv = os.urandom(16)
+        cipher = AES.new(key[:16], AES.MODE_CBC, iv)
 
-    def __encrypt_diffie_hellman(self, bytes, target):
-        pass
+        ciphertext = cipher.encrypt(pad(body))
+        print(f"ciphertext: {ciphertext}")
+
+        return ciphertext
+
+    def __decrypt_diffie_hellman(self, body: str, key: str):
+        iv = os.urandom(16)
+        print(key)
+        cipher = AES.new(key[:16], AES.MODE_CBC, iv)
+
+        deciphered = cipher.decrypt(body)
+        print(f"deciphered: {deciphered}")
+
+        return deciphered
+        
+
 
     def __string_to_bitstring(self, s: str):
         ords = (ord(c) for c in s)
@@ -273,12 +307,19 @@ class Server:
     def __bitstring_to_bytes(self, s: str):
         return int(s, 2).to_bytes((len(s) + 7) // 8, byteorder='big')
 
+    def __bytes_to_bitstring(self, bytes: bytes):
+        return BitArray(bytes=bytes).bin
+
     # adds target to the list of targets if it is not there already
     def __add_target(self, target, shared_key):
         if target not in self.targets:
             self.targets.append((target[0], target[1], shared_key))
             self.__log(
                 f"connection added to targets. Targets list: {self.targets}")
+
+    def __find_target(self, address: tuple):
+        target = [(ip, port, diffie) for ip, port, diffie in self.targets if ip == address[0] and port == address[1]]
+        return target
 
     # logs a message to the console using self values as identifiers
     def __log(self, message):
@@ -288,17 +329,9 @@ class Server:
         print(f"[{self.name.upper()}]{space} {message}")
 
     # raw __sendto wrapper
-    def __sendto(self, *, payload, target, **kwargs):
-
-        print(payload, target)
+    def __sendto(self, *, payload: bytes, target: tuple, **kwargs):
 
         if kwargs.get("size"):
             self.__log(f"sending {kwargs.get('size')} bits")
 
-        encrypted_bitstring = self.__encrypt_diffie_hellman(payload, target)
-
-        self.UDPServerSocket.sendto(payload, target)
-
-    # encodes message in utf 8
-    def __encode(self, message: str):
-        return str.encode(message)
+        self.UDPServerSocket.sendto(payload, target[:2])
