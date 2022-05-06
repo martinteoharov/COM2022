@@ -1,3 +1,4 @@
+from time import sleep
 import config
 from lib.server import Server
 
@@ -25,10 +26,6 @@ print("")
 target = config.kitchen
 waiter.conn(target)
 
+sleep(1)
 
-
-# raw sendto
-# waiter.sendto(encode("Hello cunt!"), (config.kitchen["ip"], config.kitchen["port"]))
-
-# raw sendto
-# kitchen.sendto(encode("Hello cunt!"), (config.waiter["ip"], config.waiter["port"]))
+waiter.send(message="hi!")

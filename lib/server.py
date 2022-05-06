@@ -21,7 +21,7 @@ class Server:
 
         # define diffie hellman stuff
         self.dh = pyDH.DiffieHellman()
-        self.pub_key = str(self.dh.gen_public_key())
+        self.pub_key = self.dh.gen_public_key()
 
         # define a sequence number
         if type == "waiter":
@@ -52,14 +52,15 @@ class Server:
             print("")
 
             # log & map payload
-            self.__log(f"recieved payload: {payload} from: {address[0]}:{address[1]}")
-            payload_dict, payload_is_corrupted = self.__map_payload_to_dict(payload)
+            #self.__log(f"recieved payload: {payload} from: {address[0]}:{address[1]}")
+            payload_dict, payload_is_corrupted = self.__map_payload_to_dict(
+                payload)
             self.__log(f"decoded dict from payload: {payload_dict}")
 
             # check for corruption
             if payload_is_corrupted == True:
                 self.__log("detected a corrupted package...")
-            
+
             # check if first stage of handshake
             if payload_dict["syn"] == 1:
 
@@ -69,39 +70,40 @@ class Server:
                 shared_key = self.dh.gen_shared_key(pub_key)
 
                 diffie_hellman = {"pub_key": self.pub_key}
-                
+
                 response_dict = {
                     "syn": 0,
                     "ack": 1,
                     "fin": 0,
                     "cor": 0,
-                    "sequence_number": payload_dict.get("sequence_number") or 0,
+                    "sequence_number": payload_dict.get("sequence_number"),
                     "body": diffie_hellman
                 }
 
-                response_payload, size = self.__map_dict_to_payload(response_dict)
+                response_payload, size = self.__map_dict_to_payload(
+                    response_dict)
 
+                # add target
                 self.__add_target(address, shared_key)
 
-                self.__sendto(response_payload, address, size = size)
-
+                # send diffie hellman data
+                self.__sendto(payload=response_payload, target=address, size=size)
             # check if second stage of handshake
             if payload_dict["ack"] == 1:
-                self.dh = pyDH.DiffieHellman()
 
-                self.pub_key = self.dh.get_public_key()
+                # create shared key
+                body = payload_dict.get("body")
+                pub_key = body.get("pub_key")
+                shared_key = self.dh.gen_shared_key(pub_key)
 
-
-
-                self.__add_target(address)
-
-
-
+                # add target
+                self.__add_target(address, shared_key)
 
     # This function initiates a TCP-like two-way handshake with the target. (https://www.vskills.in/certification/tutorial/tcp-connection-establish-and-terminate/)
     #
     # args: target
     # returns: void
+
     def conn(self, target: tuple) -> None:
         # define diffie_hellman stuff
         diffie_hellman = {"pub_key": self.pub_key}
@@ -116,17 +118,31 @@ class Server:
 
         payload, size = self.__map_dict_to_payload(payload_dict)
 
-        self.__sendto(payload, target, size = size)
+        self.__sendto(payload=payload, target=target, size=size)
 
     # Builds and sends a packet
-    def send(self, message):
+    def send(self, *, message):
         if not self.targets:
             self.__log(
                 "SEND(); error: target list looks empty, did you establish a connection?")
 
-        for target in self.targets:
-            self.__log(f"sending \"{message}\" to {target[0]}:{target[1]}")
-            self.__sendto(self.__encode(message), target)
+        target = None
+        if self.type == "waiter":
+            target = self.targets[0]
+
+        request_dict = {
+            "syn": 0,
+            "ack": 0,
+            "fin": 0,
+            "cor": 0,
+            "body": {message: message}
+        }
+
+        request_payload, = self.__map_dict_to_payload(request_dict)
+
+        print(target)
+
+        self.__sendto(payload=request_payload, target=target)
 
     # Example dict format argument:
     #
@@ -138,27 +154,29 @@ class Server:
     # }
     #
     # checksum & sequence number are being calculated here
+
     def __map_dict_to_payload(self, data: dict):
         # process body
         body_json_stringified = json.dumps(data.get("body") or {})
-        body_json_stringified_bitstring = self.__string_to_bitstring(body_json_stringified)
+        body_json_stringified_bitstring = self.__string_to_bitstring(
+            body_json_stringified)
 
         # calculate sequence number
         sequence_number = 0
         if self.type == "kitchen":
-            sequence_number = data.get("sequence_number") + 32 + (len(body_json_stringified_bitstring))
+            sequence_number = data.get(
+                "sequence_number") + (32 + (len(body_json_stringified_bitstring))) // 8
 
         elif self.type == "waiter":
             # calculate new sequnce_number
-            sequence_number = self.sequence_number + 32 + (len(body_json_stringified_bitstring))
+            sequence_number = (self.sequence_number + 32 +
+                               (len(body_json_stringified_bitstring))) // 8
 
             self.sequence_number = sequence_number
-        
 
         if sequence_number > 10000:
             self.__log("SEQUENCE NUMBER TOO HIGH BLYAT")
-            
-            
+
         # use 12 bits to encode sequence_number
         sequence_number_bitstring = "{0:012b}".format(sequence_number)
 
@@ -171,25 +189,17 @@ class Server:
         bitstring += sequence_number_bitstring
         bitstring += body_json_stringified_bitstring
 
-        f = open("original", "w")
-        f.write(bitstring)
-        f.close()
-        
-        # calculate checksum bitstring based on accumulated bitstring so far 
+        # calculate checksum bitstring based on accumulated bitstring so far
         checksum_bitstring = self.__calculate_checksum(bitstring)
-
-        print(checksum_bitstring)
 
         if(len(checksum_bitstring) < 16):
             print("checksum length is short wtf")
 
+        bitstring = checksum_bitstring + bitstring
 
-        # define 0b in the end so we dont need to take into account the first 2 indexes when manipulating the data
-        bitstring = "0b" + checksum_bitstring + bitstring
+        return self.__bitstring_to_bytes(bitstring), len(bitstring)
 
-        return self.__bitstring_to_bytes(bitstring), len(bitstring) - 2
-
-    # 
+    #
     # Returns
     # {
     #   syn: int,
@@ -204,9 +214,11 @@ class Server:
     #
     #
     def __map_payload_to_dict(self, payload: bytes):
-        # convert bytes to bitarray and remove first 8 bits (TODO: investigate why the function returns 1 zero-ed byte in front)
-        bitstring = BitArray(bytes=payload).bin[8:]
-        
+        # convert bytes to bitarray
+        bitstring = BitArray(bytes=payload).bin
+
+        self.__log(f"recieved {len(bitstring)} bits")
+
         checksum = bitstring[0:16]
         syn = bitstring[16]
         ack = bitstring[17]
@@ -215,15 +227,7 @@ class Server:
         sequence_number = bitstring[20:32]
         body = bitstring[32:]
 
-        # validate checksum
-        f = open("kur", "w")
-        f.write(bitstring[15:])
-        f.close()
-
-        expected_checksum = self.__calculate_checksum(bitstring[15:])
-
-        print(expected_checksum)
-        print(checksum)
+        expected_checksum = self.__calculate_checksum(bitstring[16:])
 
         corrupted = False
         if checksum == expected_checksum:
@@ -239,12 +243,12 @@ class Server:
         sequence_number_int = int(sequence_number, 2)
 
         payload_dict = {
-            "syn": int(syn), 
-            "ack": int(ack), 
-            "fin": int(fin), 
-            "cor": int(cor), 
-            "sequence_number": sequence_number_int, 
-            "checksum": checksum, 
+            "syn": int(syn),
+            "ack": int(ack),
+            "fin": int(fin),
+            "cor": int(cor),
+            "sequence_number": sequence_number_int,
+            "checksum": checksum,
             "body": json.loads(body_bytes),
         }
 
@@ -252,6 +256,12 @@ class Server:
 
     def __calculate_checksum(self, bitstring: str) -> str:
         return "{0:016b}".format(binascii.crc_hqx(self.__bitstring_to_bytes(bitstring), 0))
+
+    def __decrypt_diffie_hellman(self, bytes, target):
+        pass
+
+    def __encrypt_diffie_hellman(self, bytes, target):
+        pass
 
     def __string_to_bitstring(self, s: str):
         ords = (ord(c) for c in s)
@@ -267,7 +277,8 @@ class Server:
     def __add_target(self, target, shared_key):
         if target not in self.targets:
             self.targets.append((target[0], target[1], shared_key))
-            self.__log(f"connection added to targets. Targets list: {self.targets}")
+            self.__log(
+                f"connection added to targets. Targets list: {self.targets}")
 
     # logs a message to the console using self values as identifiers
     def __log(self, message):
@@ -277,11 +288,16 @@ class Server:
         print(f"[{self.name.upper()}]{space} {message}")
 
     # raw __sendto wrapper
-    def __sendto(self, *args, **kwargs):
-        if kwargs.get("size"):
-            self.__log(f"sending {kwargs.get('size')} bits, payload: {args[0]}")
+    def __sendto(self, *, payload, target, **kwargs):
 
-        self.UDPServerSocket.sendto(*args)
+        print(payload, target)
+
+        if kwargs.get("size"):
+            self.__log(f"sending {kwargs.get('size')} bits")
+
+        encrypted_bitstring = self.__encrypt_diffie_hellman(payload, target)
+
+        self.UDPServerSocket.sendto(payload, target)
 
     # encodes message in utf 8
     def __encode(self, message: str):
