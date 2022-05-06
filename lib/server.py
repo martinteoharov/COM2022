@@ -280,7 +280,7 @@ class Server:
         iv = os.urandom(16)
         cipher = AES.new(key[:16], AES.MODE_CBC, iv)
 
-        ciphertext = cipher.encrypt(pad(body))
+        ciphertext = cipher.encrypt(body)
         print(f"ciphertext: {ciphertext}")
 
         return ciphertext
