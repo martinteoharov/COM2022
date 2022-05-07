@@ -1,16 +1,14 @@
 import socket
 import threading
+
 import json
-
-import os
-
 from bitstring import BitArray
 import binascii
 
 import pyDH
 
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad, unpad
+from lib.AES.AES import AESCipher
+from .commands import GOOD_REQUEST
 
 class Server:
     def __init__(self, *, name: str, type: str, ip: str, port: int, transport: str, buffer_size: int):
@@ -30,6 +28,8 @@ class Server:
         # define a sequence number
         if type == "waiter":
             self.sequence_number = 0
+        elif type == "kitchen":
+            self.orders = []
 
         # define socket type (UDP)
         self.socket_type = socket.SOCK_DGRAM if transport == "UDP" else socket.SOCK_STREAM
@@ -57,8 +57,9 @@ class Server:
 
             target = self.__find_target(address)
             key = None
-            if len(target) == 3:
-                key = target[2]
+
+            if len(target) > 0:
+                key = target[0][2]
 
             # log & map payload
             self.__log(f"recieved payload: {payload} from: {address[0]}:{address[1]}")
@@ -69,8 +70,10 @@ class Server:
             if payload_is_corrupted == True:
                 self.__log("detected a corrupted package...")
 
+            body = payload_dict["body"]
+
             # check if first stage of handshake
-            if payload_dict["syn"] == 1:
+            if payload_dict.get("syn") and payload_dict["syn"] == 1:
 
                 # create shared key
                 body = payload_dict["body"]
@@ -93,11 +96,11 @@ class Server:
                 # add target
                 self.__add_target(address, shared_key)
 
-
                 # send diffie hellman data
                 self.__sendto(payload=response_payload, target=address, size=size)
+
             # check if second stage of handshake
-            if payload_dict["ack"] == 1:
+            elif payload_dict.get("ack") and payload_dict["ack"] == 1:
 
                 # create shared key
                 body = payload_dict["body"]
@@ -106,6 +109,25 @@ class Server:
 
                 # add target
                 self.__add_target(address, shared_key)
+
+            # create order
+            elif body.get("cmd") == "CREATE":
+                self.orders.append(body)
+                self.__log(f"Creating order...: {body}")
+            
+            # cancel order
+            elif body.get("cmd") == "CANCEL":
+                order = [order for order in self.orders if order["waiter_id"] == body["waiter_id"] and order["table_id"] == body["table_id"]][0]
+
+                if order:
+                    self.__log(f"Cancelling order...: {order}")
+                    self.orders.remove(order)
+                    payload_dict = GOOD_REQUEST()
+                    response_payload, size = self.__map_dict_to_payload(payload_dict)
+                    # self.__sendto(payload=response_payload, target=target[0], size=size)
+                else:
+                    self.__log("Order not found")
+
 
     # This function initiates a TCP-like two-way handshake with the target. (https://www.vskills.in/certification/tutorial/tcp-connection-establish-and-terminate/)
     #
@@ -129,7 +151,7 @@ class Server:
         self.__sendto(payload=payload, target=target, size=size)
 
     # Builds and sends a packet
-    def send(self, *, message):
+    def send(self, *, payload_dict: dict):
         if not self.targets:
             self.__log("SEND(); error: target list looks empty, did you establish a connection?")
 
@@ -137,21 +159,11 @@ class Server:
         if self.type == "waiter":
             target = self.targets[0]
 
-        body = { "message": message }
-
-        request_dict = {
-            "syn": 0,
-            "ack": 0,
-            "fin": 0,
-            "cor": 0,
-            "body": body
-        }
-
         key = None
         if target and len(target) > 2:
             key = target[2]
 
-        request_payload, size = self.__map_dict_to_payload(request_dict, key=key)
+        request_payload, size = self.__map_dict_to_payload(payload_dict, key=key)
 
         self.__log(f"sending {size} bits, payload: {request_payload}")
 
@@ -182,8 +194,6 @@ class Server:
 
         body_bitstring = self.__string_to_bitstring(body_stringified)
 
-
-        # calculate sequence number
         sequence_number = 0
         if self.type == "kitchen": 
             sequence_number = data.get("sequence_number") or 0
@@ -196,16 +206,13 @@ class Server:
 
         # pack bits
         bitstring = ""
-        bitstring += str(data.get("syn")) or str(0)
-        bitstring += str(data.get("ack")) or str(0)
-        bitstring += str(data.get("fin")) or str(0)
-        bitstring += str(data.get("cor")) or str(0)
+        bitstring += str(data.get("syn") or 0)
+        bitstring += str(data.get("ack") or 0)
+        bitstring += str(data.get("fin") or 0)
+        bitstring += str(data.get("cor") or 0)
         bitstring += sequence_number_bitstring
         bitstring += body_bitstring
         checksum_bitstring = self.__calculate_checksum(bitstring) # calculate checksum bitstring based on accumulated bitstring so far
-
-        if(len(checksum_bitstring) < 16):
-            print("checksum length is short wtf")
 
         bitstring = checksum_bitstring + bitstring
 
@@ -256,6 +263,7 @@ class Server:
 
         if key is not None:
             self.__log(f"Found key: {key}")
+            print(body_string)
             body_string = self.__decrypt_diffie_hellman(body_string, key)
 
         # decode decimal int from bits
@@ -273,29 +281,23 @@ class Server:
 
         return payload_dict, corrupted
 
+    def __encrypt_diffie_hellman(self, body: str, key: str):
+        aes = AESCipher(key)
+
+        encrypted = aes.encrypt(body)
+
+        return encrypted
+        
+    def __decrypt_diffie_hellman(self, body: str, key: str):
+        aes = AESCipher(key)
+
+        decrypted = aes.decrypt(body)
+
+        return decrypted
+
+
     def __calculate_checksum(self, bitstring: str) -> str:
         return "{0:016b}".format(binascii.crc_hqx(self.__bitstring_to_bytes(bitstring), 0))
-
-    def __encrypt_diffie_hellman(self, body: str, key: str):
-        iv = os.urandom(16)
-        cipher = AES.new(key[:16], AES.MODE_CBC, iv)
-
-        ciphertext = cipher.encrypt(body)
-        print(f"ciphertext: {ciphertext}")
-
-        return ciphertext
-
-    def __decrypt_diffie_hellman(self, body: str, key: str):
-        iv = os.urandom(16)
-        print(key)
-        cipher = AES.new(key[:16], AES.MODE_CBC, iv)
-
-        deciphered = cipher.decrypt(body)
-        print(f"deciphered: {deciphered}")
-
-        return deciphered
-        
-
 
     def __string_to_bitstring(self, s: str):
         ords = (ord(c) for c in s)
