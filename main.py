@@ -5,25 +5,25 @@ from lib.server import Server
 waiter = Server(
         name = "Waiter",
         type = "waiter",
-        ip = config.waiter[0], 
-        port = config.waiter[1], 
-        transport = config.transport, 
-        buffer_size = config.buffer_size, 
+        ip = config.WAITER[0], 
+        port = config.WAITER[1], 
+        transport = config.TRANSPORT, 
+        buffer_size = config.BUFFER_SIZE, 
     )
 
 kitchen = Server(
         name = "Kitchen",
         type = "kitchen",
-        ip = config.kitchen[0], 
-        port = config.kitchen[1], 
-        transport = config.transport, 
-        buffer_size = config.buffer_size, 
+        ip = config.KITCHEN[0], 
+        port = config.KITCHEN[1], 
+        transport = config.TRANSPORT, 
+        buffer_size = config.BUFFER_SIZE, 
     )
 
 print("")
 
 
-target = config.kitchen
+target = config.KITCHEN
 waiter.conn(target)
 
 sleep(1)

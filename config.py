@@ -1,10 +1,10 @@
-transport = "UDP"
+TRANSPORT = "UDP"
 
-timeout_ms = 1000
+TIMEOUT_MAX_MS = 1000
 
 # maxQueueSize = 1000
-buffer_size = 1024
+BUFFER_SIZE = 1024
 
-waiter = ("127.0.0.1", 3000)
+WAITER = ("127.0.0.1", 3000)
 
-kitchen = ("127.0.0.1", 3001)
+KITCHEN = ("127.0.0.1", 3001)

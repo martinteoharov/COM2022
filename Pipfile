@@ -4,6 +4,11 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
+bitstring = "3.1.9"
+cffi = "1.15.0"
+pycparser = "2.21"
+pycryptodome = "3.14.1"
+pyDH = "0.1.6"
 
 [dev-packages]
 
